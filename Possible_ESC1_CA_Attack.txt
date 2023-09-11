@@ -1,0 +1,119 @@
+query CertificationAuthority($ip, $fqdn) from Certification_Authority_hosts {
+    (
+        (ip != null and ip == $ip)
+        or (fqdn != null and fqdn == $fqdn)
+    )
+}
+
+event Successful_Login_on_CA:
+    key:
+        event_src.host, subject.name
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "4624"
+        and exec_query("CertificationAuthority", [recv_ipv4, event_src.host])
+        and status == "success"
+        and logon_service == "NtLmSsp"
+    }
+
+event CA_Certificate_Request:
+    key:
+        event_src.host, subject.name
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "4886"
+        and exec_query("CertificationAuthority", [recv_ipv4, event_src.host])
+    }
+
+event CA_Certificate_Issue:
+    key:
+        event_src.host, subject.name
+    filter {
+        filter::NotFromCorrelator()
+        and msgid == "4887"
+        and exec_query("CertificationAuthority", [recv_ipv4, event_src.host])
+        and datafield3 != null
+    } 
+    
+
+rule Possible_ESC1_CA_Attack: (Successful_Login_on_CA and CA_Certificate_Request and CA_Certificate_Issue) timer 1m
+
+    init {
+    	$labels = "w_auto"
+    }
+
+    on Successful_Login_on_CA {
+        $status = status
+        $logon_service = logon_service
+        $logon_type = logon_type
+        
+        $subject.name = subject.name
+        $subject.domain = subject.domain
+        $subject.id = subject.id
+        $subject.account.name = subject.account.name
+        $subject.account.domain = subject.account.domain
+        $subject.account.session_id = subject.account.session_id
+        $subject.account.id = subject.account.id
+        
+        $datafield2 = "upn="+subject.account.name+"@"+subject.account.domain  # формирование upn=username@domain для дальнейшего сравнения
+
+        $event_src.host = event_src.host
+        $event_src.hostname = event_src.hostname
+        $event_src.fqdn = event_src.fqdn
+        $event_src.asset = event_src.asset
+        $event_src.title = event_src.title
+        $event_src.vendor = event_src.vendor
+        
+        $src.ip = src.ip
+        $src.host = src.host
+        $src.asset = src.asset
+        $src.port = src.port
+        
+        $dst.host = dst.host
+        $dst.hostname = dst.hostname
+        $dst.ip = dst.ip
+        $dst.port = dst.port
+        $dst.asset = dst.asset
+        $dst.fqdn = dst.fqdn
+    }
+
+    on CA_Certificate_Request {
+        $object = object
+        $object.property = object.property
+        $datafield1 = datafield1  # номер запроса сертификата
+    }
+
+    on CA_Certificate_Issue {
+    	$object.name = object.name
+        $object.id = object.id
+        $object.state = object.state
+        $datafield3 = datafield3
+
+        $alert.key = subject.name
+    }
+
+emit {
+    $subject = "account"
+    $action = "start"
+
+	$importance = "high"
+	
+    $category.generic = "Attack"
+    $category.high = "Credential Access"
+    $category.low = "Digital Certificates"
+    
+    if $datafield3 != $datafield2 then
+        $correlation_type = "incident"
+        $reason = "Certificate with SAN successfully isuued. Possible ESC1."
+    else
+    	$correlation_type = "event"
+        $reason = "Suspicious certificate retrieval."
+    endif
+    
+	$incident.aggregation.key = join([$correlation_name, $subject.name, $src.ip], "|")
+    $incident.severity = "high"
+    $incident.category = "UserCompromising"
+    $incident.aggregation.timeout = 30m
+}
+
+```
